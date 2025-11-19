@@ -4,21 +4,34 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 from scipy.signal import resample
-import wfdb.processing
+import wfdb
+from wfdb import processing
 import os
 import sys
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # --- 1. CONFIGURATION ---
 MODEL_PATH = 'model_B_noisy.keras'
 TARGET_FS = 360
 WINDOW_SIZE = 180
 
-# Class mapping based on alphabetical order ['F', 'N', 'S', 'V']
-LABELS = {
-    0: "F - Fusion Beat",
-    1: "N - Normal Beat",
-    2: "S - Supraventricular Ectopic",
-    3: "V - Ventricular Ectopic"
+# Model Classes (Alphabetical Order)
+LABELS_MAP = {
+    0: "F",
+    1: "N",
+    2: "S",
+    3: "V"
+}
+
+# MIT-BIH Annotation Mapping to Model Classes
+# Maps standard physionet symbols to our 4 classes
+# N: Normal, S: Supraventricular, V: Ventricular, F: Fusion
+ANNOTATION_MAPPING = {
+    'N': 1, 'L': 1, 'R': 1, 'e': 1, 'j': 1,  # Normal variants -> N (1)
+    'A': 2, 'a': 2, 'J': 2, 'S': 2,          # SVEB variants -> S (2)
+    'V': 3, 'E': 3,                          # VEB variants -> V (3)
+    'F': 0,                                  # Fusion -> F (0)
+    '/': -1, 'f': -1, 'Q': -1, '?': -1       # Unknown/Paced -> Ignore (-1)
 }
 
 # --- 2. UTILITY FUNCTIONS ---
@@ -35,47 +48,82 @@ def load_ecg_model():
         return None
 
 def load_data(uploaded_file):
-    """Robust CSV loader that handles headers automatically."""
+    """
+    Robust CSV loader.
+    - Handles multiple columns by summing them.
+    - Returns signal, status message, and success flag.
+    """
     try:
-        # 1. Try reading with header inferred (default)
+        # Try reading with header inferred
         df = pd.read_csv(uploaded_file)
         
-        # Select the first numeric column found
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        # Filter only numeric columns
+        df = df.select_dtypes(include=[np.number])
         
-        if len(numeric_cols) > 0:
-            # Found numeric column, use the first one
-            return df[numeric_cols[0]].values.astype(float)
-        else:
-            # No numeric columns found? Maybe header was None but first row was data?
-            # Reload with header=None
+        # If empty, maybe it didn't have a header? Try treating top row as data
+        if df.empty:
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file, header=None)
-            # Force convert to numeric, coercing errors
-            flat_data = pd.to_numeric(df.iloc[:, 0], errors='coerce').dropna()
-            return flat_data.values
+            df = df.select_dtypes(include=[np.number])
+
+        if df.empty:
+            return None, "No numeric data found in CSV.", False
+
+        # Logic for multiple leads
+        if df.shape[1] > 1:
+            # Sum across columns (axis 1)
+            signal = df.sum(axis=1).values
+            msg = f"ℹ️ **Multiple leads detected ({df.shape[1]}).** Using the **sum** of all leads for prediction."
+        else:
+            signal = df.iloc[:, 0].values
+            msg = "✅ Single lead detected."
+
+        return signal.astype(float), msg, True
             
     except Exception as e:
-        st.error(f"Error reading CSV: {e}")
-        return None
+        return None, f"Error reading CSV: {e}", False
+
+def fetch_physionet_record(record_id, db='mitdb'):
+    """Fetches signal and annotations from PhysioNet."""
+    try:
+        # Read record (Signal)
+        record = wfdb.rdrecord(record_id, pn_dir=db)
+        # Read annotations (Ground Truth)
+        annotation = wfdb.rdann(record_id, 'atr', pn_dir=db)
+        
+        # Handle multiple channels (PhysioNet usually has 2)
+        if record.n_sig > 1:
+            # Sum all channels as requested
+            signal = np.sum(record.p_signal, axis=1)
+            msg = f"Fetched Record {record_id}. Merged {record.n_sig} leads (Sum)."
+        else:
+            signal = record.p_signal.flatten()
+            msg = f"Fetched Record {record_id}. Single lead."
+            
+        return signal, annotation, msg, True
+    except Exception as e:
+        return None, None, f"Error fetching from PhysioNet: {e}", False
 
 def preprocess_signal(signal, current_fs):
-    # A. Resample
+    """
+    Preprocessing Pipeline matching Training:
+    1. Resample to 360Hz.
+    2. Peak Detection (XQRS) on RESAMPLED RAW signal.
+    3. Normalize (Z-Score).
+    4. Segment from NORMALIZED signal.
+    """
+    
+    # 1. Resample
     if current_fs != TARGET_FS:
         number_of_samples = int(len(signal) * TARGET_FS / current_fs)
         signal = resample(signal, number_of_samples)
     
-    # B. Normalize (Z-Score)
-    mean = np.mean(signal)
-    std = np.std(signal)
-    if std == 0: std = 1
-    signal_normalized = (signal - mean) / std
-    
-    # C. R-Peak Detection
+    # 2. Peak Detection (on RAW signal for better robustness)
+    # We perform detection before normalization because XQRS often expects standard ECG amplitudes
     old_stdout = sys.stdout
-    sys.stdout = open(os.devnull, 'w')
+    sys.stdout = open(os.devnull, 'w') # Suppress wfdb prints
     try:
-        qrs_detector = wfdb.processing.XQRS(sig=signal_normalized, fs=TARGET_FS)
+        qrs_detector = wfdb.processing.XQRS(sig=signal, fs=TARGET_FS)
         qrs_detector.detect()
         r_peaks = qrs_detector.qrs_inds
     except:
@@ -83,9 +131,15 @@ def preprocess_signal(signal, current_fs):
     finally:
         sys.stdout = old_stdout
 
-    # D. Segmentation
+    # 3. Normalize (Z-Score)
+    mean = np.mean(signal)
+    std = np.std(signal)
+    if std == 0: std = 1
+    signal_normalized = (signal - mean) / std
+    
+    # 4. Segmentation
     segments = []
-    valid_peaks = []
+    valid_peaks = [] # Keep track of which peaks we actually used
     half_window = WINDOW_SIZE // 2
     
     for peak in r_peaks:
@@ -99,10 +153,45 @@ def preprocess_signal(signal, current_fs):
                 valid_peaks.append(peak)
     
     if len(segments) == 0:
-        return None, None, signal_normalized
+        return None, [], None
         
     X = np.array(segments).reshape(-1, WINDOW_SIZE, 1)
     return X, valid_peaks, signal_normalized
+
+def evaluate_against_ground_truth(valid_peaks, annotation_obj, predictions_indices):
+    """
+    Aligns detected peaks with true annotations to calculate accuracy.
+    """
+    if not annotation_obj:
+        return None
+
+    true_peaks = annotation_obj.sample
+    true_symbols = annotation_obj.symbol
+    
+    y_true = []
+    y_pred = []
+    
+    # Tolerance window (e.g., 36 samples is 100ms at 360Hz)
+    tolerance = int(0.1 * TARGET_FS)
+    
+    for i, peak in enumerate(valid_peaks):
+        # Find closest true peak
+        diffs = np.abs(true_peaks - peak)
+        min_idx = np.argmin(diffs)
+        
+        if diffs[min_idx] <= tolerance:
+            symbol = true_symbols[min_idx]
+            
+            # Check if this symbol maps to one of our 4 classes
+            if symbol in ANNOTATION_MAPPING:
+                class_id = ANNOTATION_MAPPING[symbol]
+                
+                # -1 means ignore (Unknown/Paced classes not trained on)
+                if class_id != -1:
+                    y_true.append(class_id)
+                    y_pred.append(predictions_indices[i])
+                    
+    return y_true, y_pred
 
 # --- 3. STREAMLIT UI ---
 
@@ -114,49 +203,103 @@ model = load_ecg_model()
 if model:
     st.success("Model loaded successfully!")
     
-    st.sidebar.header("Input Settings")
-    uploaded_file = st.sidebar.file_uploader("Upload ECG CSV", type=["csv"])
-    input_fs = st.sidebar.number_input("Sampling Rate (Hz)", value=360)
+    # Tabs for different input methods
+    tab1, tab2 = st.tabs(["📂 Upload CSV", "🌐 PhysioNet (MIT-BIH)"])
 
-    if uploaded_file is not None:
-        # Load data using the robust function
-        raw_signal = load_data(uploaded_file)
-        
-        if raw_signal is not None and len(raw_signal) > 0:
-            st.subheader("Signal Preview")
-            st.line_chart(raw_signal[:1000], height=150)
+    # --- TAB 1: CSV UPLOAD ---
+    with tab1:
+        st.header("Analyze Local File")
+        uploaded_file = st.file_uploader("Upload ECG CSV", type=["csv"])
+        input_fs = st.number_input("Sampling Rate (Hz)", value=360, key="csv_fs")
+
+        if uploaded_file is not None:
+            signal, msg, success = load_data(uploaded_file)
             
-            if st.button("Analyze ECG"):
-                with st.spinner("Processing..."):
-                    X_segments, r_peaks, proc_signal = preprocess_signal(raw_signal, input_fs)
-                    
-                    if X_segments is not None:
-                        predictions = model.predict(X_segments)
-                        pred_classes = np.argmax(predictions, axis=1)
-                        pred_labels = [LABELS.get(i, "Unknown") for i in pred_classes]
+            if success:
+                st.markdown(msg) # Show multilead message if applicable
+                st.line_chart(signal[:1000], height=150)
+                
+                if st.button("Predict CSV"):
+                    with st.spinner("Processing..."):
+                        X, peaks, _ = preprocess_signal(signal, input_fs)
                         
-                        col1, col2 = st.columns([2, 1])
-                        with col1:
-                            st.subheader("Beat-by-Beat Analysis")
-                            results_df = pd.DataFrame({
-                                "Beat #": range(1, len(pred_labels) + 1),
-                                "R-Peak": r_peaks,
-                                "Prediction": pred_labels,
-                                "Confidence": [f"{np.max(p)*100:.1f}%" for p in predictions]
-                            })
-                            st.dataframe(results_df, use_container_width=True, height=400)
-
-                        with col2:
-                            st.subheader("Summary")
+                        if X is not None:
+                            preds = model.predict(X)
+                            pred_idxs = np.argmax(preds, axis=1)
+                            pred_labels = [LABELS_MAP[i] for i in pred_idxs]
+                            
+                            # Display Summary
+                            st.subheader("Results")
                             counts = pd.Series(pred_labels).value_counts()
                             st.bar_chart(counts)
                             
-                            abnormal = [l for l in pred_labels if not l.startswith('N')]
+                            # Highlight Abnormal
+                            abnormal = [l for l in pred_labels if l != 'N']
                             if abnormal:
-                                st.error(f"⚠️ Found {len(abnormal)} abnormal beats!")
+                                st.warning(f"⚠️ Detected {len(abnormal)} Arrhythmic Beats!")
                             else:
-                                st.success("✅ Normal Sinus Rhythm")
+                                st.success("✅ Normal Sinus Rhythm Detected")
+                                
+                            # Detail Table
+                            df_res = pd.DataFrame({
+                                "Beat Index": range(len(pred_labels)),
+                                "Peak Loc": peaks,
+                                "Prediction": pred_labels,
+                                "Confidence": [f"{np.max(p)*100:.1f}%" for p in preds]
+                            })
+                            st.dataframe(df_res, use_container_width=True, height=300)
+                        else:
+                            st.error("Could not detect valid heartbeats.")
+            else:
+                st.error(msg)
+
+    # --- TAB 2: PHYSIONET ---
+    with tab2:
+        st.header("Test on MIT-BIH Database")
+        col_a, col_b = st.columns([1, 3])
+        with col_a:
+            # Common MIT-BIH records
+            record_id = st.text_input("Record ID (e.g., 100, 234)", value="100")
+        with col_b:
+            st.write("") # Spacer
+            st.write("")
+            fetch_btn = st.button("Load Record & Test Accuracy")
+            
+        if fetch_btn:
+            with st.spinner(f"Fetching Record {record_id} from PhysioNet..."):
+                sig, ann, msg, ok = fetch_physionet_record(record_id)
+                
+                if ok:
+                    st.info(msg)
+                    st.line_chart(sig[:1000], height=150)
+                    
+                    # Predict
+                    X, peaks, _ = preprocess_signal(sig, 360) # MIT-BIH is 360Hz
+                    
+                    if X is not None:
+                        preds = model.predict(X)
+                        pred_idxs = np.argmax(preds, axis=1)
+                        
+                        # Calculate Accuracy
+                        y_true, y_pred_filtered = evaluate_against_ground_truth(peaks, ann, pred_idxs)
+                        
+                        if y_true and len(y_true) > 0:
+                            acc = accuracy_score(y_true, y_pred_filtered)
+                            st.metric("Model Accuracy on this Record", f"{acc*100:.2f}%")
+                            
+                            # Detailed Metrics
+                            st.text("Classification Report:")
+                            report = classification_report(y_true, y_pred_filtered, 
+                                                           target_names=[LABELS_MAP[i] for i in sorted(set(y_true))],
+                                                           zero_division=0)
+                            st.code(report)
+                            
+                            # Confusion Matrix Visualization could go here
+                            
+                        else:
+                            st.warning("Could not align detected peaks with ground truth annotations for accuracy.")
+                            
                     else:
-                        st.warning("No heartbeats detected. Check signal quality or sampling rate.")
-        else:
-            st.error("Could not parse numeric data from CSV. Please ensure it contains ECG signal values.")
+                        st.error("Signal processing failed to extract beats.")
+                else:
+                    st.error(msg)
