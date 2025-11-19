@@ -49,37 +49,84 @@ def load_ecg_model():
 
 def load_data(uploaded_file):
     """
-    Robust CSV loader.
-    - Handles multiple columns by summing them.
-    - Returns signal, status message, and success flag.
+    Advanced CSV loader with lead-selection logic:
+    1. If Lead II + V5 both exist -> sum those
+    2. Else if II missing -> sum I + III + V5 (if present)
+    3. Else if V1-V5 exist -> sum them
+    4. Else -> sum all numeric leads but take abs() amplitude
     """
     try:
-        # Try reading with header inferred
         df = pd.read_csv(uploaded_file)
-        
-        # Filter only numeric columns
         df = df.select_dtypes(include=[np.number])
-        
-        # If empty, maybe it didn't have a header? Try treating top row as data
+
         if df.empty:
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file, header=None)
             df = df.select_dtypes(include=[np.number])
 
         if df.empty:
-            return None, "No numeric data found in CSV.", False
+            return None, "No numeric ECG data found in CSV.", False
 
-        # Logic for multiple leads
-        if df.shape[1] > 1:
-            # Sum across columns (axis 1)
-            signal = df.sum(axis=1).values
-            msg = f"ℹ️ **Multiple leads detected ({df.shape[1]}).** Using the **sum** of all leads for prediction."
-        else:
-            signal = df.iloc[:, 0].values
-            msg = "✅ Single lead detected."
+        # --- Normalize Column Names ---
+        cols = [str(c).lower() for c in df.columns]
 
-        return signal.astype(float), msg, True
-            
+        def has(name):
+            return name.lower() in cols
+
+        # Map common ECG lead naming variations
+        lead_aliases = {
+            "i": ["i", "lead1", "l1"],
+            "ii": ["ii", "lead2", "l2"],
+            "iii": ["iii", "lead3", "l3"],
+            "v1": ["v1"],
+            "v2": ["v2"],
+            "v3": ["v3"],
+            "v4": ["v4"],
+            "v5": ["v5"],
+            "v6": ["v6"]
+        }
+
+        def get_cols(names):
+            return [df.columns[cols.index(alias)]
+                    for n in names
+                    for alias in lead_aliases.get(n, [])
+                    if alias in cols]
+
+        # ------ RULE 1: If II + V5 exist ------
+        lead_ii = get_cols(["ii"])
+        lead_v5 = get_cols(["v5"])
+
+        if lead_ii and lead_v5:
+            msg = "ℹ️ Using **Lead II + V5** (Rule 1)."
+            selected = df[lead_ii + lead_v5].sum(axis=1)
+            return selected.values.astype(float), msg, True
+
+        # ------ RULE 2: If II missing -> I + III + V5 ------
+        lead_i = get_cols(["i"])
+        lead_iii = get_cols(["iii"])
+
+        if not lead_ii and (lead_i or lead_iii or lead_v5):
+            chosen = lead_i + lead_iii + lead_v5
+            chosen = list(dict.fromkeys(chosen))  # unique
+            msg = "ℹ️ 'Lead II' not found. Using **I + III + V5** (Rule 2)."
+            selected = df[chosen].sum(axis=1)
+            return selected.values.astype(float), msg, True
+
+        # ------ RULE 3: Use any of V1–V5 ------
+        v_leads = []
+        for v in ["v1", "v2", "v3", "v4", "v5"]:
+            v_leads += get_cols([v])
+
+        if len(v_leads) >= 2:  # at least two chest leads available
+            msg = "ℹ️ Using available **V1–V5** leads (Rule 3)."
+            selected = df[v_leads].sum(axis=1)
+            return selected.values.astype(float), msg, True
+
+        # ------ RULE 4: Fallback -> sum all numeric leads with abs() ------
+        msg = "ℹ️ Using **all numeric leads (abs amplitude)** (Rule 4)."
+        selected = df.abs().sum(axis=1)
+        return selected.values.astype(float), msg, True
+
     except Exception as e:
         return None, f"Error reading CSV: {e}", False
 
