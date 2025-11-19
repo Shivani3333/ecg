@@ -254,52 +254,58 @@ if model:
                 st.error(msg)
 
     # --- TAB 2: PHYSIONET ---
-    with tab2:
-        st.header("Test on MIT-BIH Database")
-        col_a, col_b = st.columns([1, 3])
-        with col_a:
-            # Common MIT-BIH records
-            record_id = st.text_input("Record ID (e.g., 100, 234)", value="100")
-        with col_b:
-            st.write("") # Spacer
-            st.write("")
-            fetch_btn = st.button("Load Record & Test Accuracy")
+# --- TAB 2: PHYSIONET ---
+with tab2:
+    st.header("Test on MIT-BIH Database")
+    col_a, col_b = st.columns([1, 3])
+    with col_a:
+        record_id = st.text_input("Record ID (e.g., 100, 234)", value="100")
+    with col_b:
+        st.write("")
+        st.write("")
+        fetch_btn = st.button("Load Record & Test Accuracy")
+        
+    if fetch_btn:
+        with st.spinner(f"Fetching Record {record_id} from PhysioNet..."):
+            sig, ann, msg, ok = fetch_physionet_record(record_id)
             
-        if fetch_btn:
-            with st.spinner(f"Fetching Record {record_id} from PhysioNet..."):
-                sig, ann, msg, ok = fetch_physionet_record(record_id)
+            if ok:
+                st.info(msg)
+                st.line_chart(sig[:1000], height=150)
                 
-                if ok:
-                    st.info(msg)
-                    st.line_chart(sig[:1000], height=150)
+                # Predict
+                X, peaks, _ = preprocess_signal(sig, 360)  # MIT-BIH is 360Hz
+                
+                if X is not None:
+                    preds = model.predict(X)
+                    pred_idxs = np.argmax(preds, axis=1)
                     
-                    # Predict
-                    X, peaks, _ = preprocess_signal(sig, 360) # MIT-BIH is 360Hz
+                    # Align predictions with ground truth
+                    y_true, y_pred_filtered = evaluate_against_ground_truth(peaks, ann, pred_idxs)
                     
-                    if X is not None:
-                        preds = model.predict(X)
-                        pred_idxs = np.argmax(preds, axis=1)
+                    if y_true and len(y_true) > 0:
+                        acc = accuracy_score(y_true, y_pred_filtered)
+                        st.metric("Model Accuracy on this Record", f"{acc*100:.2f}%")
                         
-                        # Calculate Accuracy
-                        y_true, y_pred_filtered = evaluate_against_ground_truth(peaks, ann, pred_idxs)
+                        # ---- FIXED CLASSIFICATION REPORT ----
+                        all_labels = [0, 1, 2, 3]
+                        all_names = [LABELS_MAP[i] for i in all_labels]
+
+                        report = classification_report(
+                            y_true,
+                            y_pred_filtered,
+                            labels=all_labels,
+                            target_names=all_names,
+                            zero_division=0
+                        )
                         
-                        if y_true and len(y_true) > 0:
-                            acc = accuracy_score(y_true, y_pred_filtered)
-                            st.metric("Model Accuracy on this Record", f"{acc*100:.2f}%")
-                            
-                            # Detailed Metrics
-                            st.text("Classification Report:")
-                            report = classification_report(y_true, y_pred_filtered, 
-                                                           target_names=[LABELS_MAP[i] for i in sorted(set(y_true))],
-                                                           zero_division=0)
-                            st.code(report)
-                            
-                            # Confusion Matrix Visualization could go here
-                            
-                        else:
-                            st.warning("Could not align detected peaks with ground truth annotations for accuracy.")
-                            
+                        st.text("Classification Report:")
+                        st.code(report)
+                        
                     else:
-                        st.error("Signal processing failed to extract beats.")
+                        st.warning("Could not align detected peaks with ground truth annotations for accuracy.")
+                        
                 else:
-                    st.error(msg)
+                    st.error("Signal processing failed to extract beats.")
+            else:
+                st.error(msg)
