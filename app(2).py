@@ -337,7 +337,21 @@ if model:
             
             if success:
                 st.markdown(msg) # Show multilead message if applicable
-                st.line_chart(signal[:1000], height=150)
+                import matplotlib.pyplot as plt
+
+# Plot first 1000 samples with axis labels
+                fig, ax = plt.subplots(figsize=(10, 3))
+
+                t = np.arange(len(signal[:1000])) / input_fs
+                ax.plot(t, signal[:1000])
+
+                ax.set_title("ECG Signal (First 1000 samples)")
+                ax.set_xlabel("Time (seconds)")
+                ax.set_ylabel("Amplitude (mV)")
+                ax.grid(True)
+
+                st.pyplot(fig)
+
                 
                 if st.button("Predict CSV"):
                     with st.spinner("Processing..."):
@@ -395,7 +409,19 @@ with tab2:
             
             if ok:
                 st.info(msg)
-                st.line_chart(sig[:1000], height=150)
+
+                fig, ax = plt.subplots(figsize=(10, 3))
+
+                t = np.arange(len(sig[:1000])) / 360  # MIT-BIH 360 Hz
+                ax.plot(t, sig[:1000])
+
+                ax.set_title(f"MIT-BIH Record {record_id} – First 1000 Samples")
+                ax.set_xlabel("Time (seconds)")
+                ax.set_ylabel("Amplitude (mV)")
+                ax.grid(True)
+
+                st.pyplot(fig)
+
                 
                 # Predict
                 X, peaks, _ = preprocess_signal(sig, 360)  # MIT-BIH is 360Hz
