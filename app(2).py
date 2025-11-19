@@ -209,6 +209,34 @@ def evaluate_against_ground_truth(valid_peaks, annotation_obj, predictions_indic
     """
     Aligns detected peaks with true annotations to calculate accuracy.
     """
+    # --- Visualization Functions ---
+
+import matplotlib.pyplot as plt
+
+def plot_signal_with_peaks(signal, peaks):
+    plt.figure(figsize=(12, 3))
+    plt.plot(signal, linewidth=0.8)
+    plt.scatter(peaks, signal[peaks], color='red', s=10, label='R-peaks')
+    plt.title("Full ECG Signal with R-Peaks")
+    plt.legend()
+    st.pyplot(plt)
+    plt.close()
+
+def plot_single_beat(segment, pred_label, prob_values):
+    plt.figure(figsize=(6, 3))
+    plt.plot(segment, linewidth=1)
+    plt.title(
+        f"Predicted: {pred_label}  |  "
+        f"P(F)={prob_values[0]:.2f}, "
+        f"P(N)={prob_values[1]:.2f}, "
+        f"P(S)={prob_values[2]:.2f}, "
+        f"P(V)={prob_values[3]:.2f}"
+    )
+    plt.xlabel("Samples")
+    plt.ylabel("Normalized Amplitude")
+    st.pyplot(plt)
+    plt.close()
+
     if not annotation_obj:
         return None
 
@@ -295,8 +323,23 @@ if model:
                                 "Confidence": [f"{np.max(p)*100:.1f}%" for p in preds]
                             })
                             st.dataframe(df_res, use_container_width=True, height=300)
+                            # --- Visualization ---
+                            st.subheader("Full Signal with Detected R-Peaks")
+                            plot_signal_with_peaks(signal, peaks)
+
+                            st.subheader("Beat-by-Beat Visualization")
+
+                            max_beats_to_show = min(10, len(pred_idxs))  # show first 10 beats
+
+                            for i in range(max_beats_to_show):
+                                seg = X[i].flatten()
+                                pred_label = LABELS_MAP[pred_idxs[i]]
+                                prob_values = preds[i]
+                                plot_single_beat(seg, pred_label, prob_values)
+
                         else:
                             st.error("Could not detect valid heartbeats.")
+                            
             else:
                 st.error(msg)
 
@@ -348,6 +391,20 @@ with tab2:
                         
                         st.text("Classification Report:")
                         st.code(report)
+                        # --- Visualization ---
+                        st.subheader("Full Signal with Detected R-Peaks")
+                        plot_signal_with_peaks(sig, peaks)
+
+                        st.subheader("Beat-by-Beat Visualization")
+
+                        max_beats_to_show = min(10, len(pred_idxs))
+
+                        for i in range(max_beats_to_show):
+                            seg = X[i].flatten()
+                            pred_label = LABELS_MAP[pred_idxs[i]]
+                            prob_values = preds[i]
+                            plot_single_beat(seg, pred_label, prob_values)
+
                         
                     else:
                         st.warning("Could not align detected peaks with ground truth annotations for accuracy.")
