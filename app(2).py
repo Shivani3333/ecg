@@ -34,6 +34,78 @@ ANNOTATION_MAPPING = {
     '/': -1, 'f': -1, 'Q': -1, '?': -1       # Unknown/Paced -> Ignore (-1)
 }
 
+
+
+def generate_condition_paragraph(y_pred):
+    """
+    Returns a short, user-friendly paragraph summarizing
+    possible heart conditions based on predicted ECG classes.
+    """
+
+    if len(y_pred) == 0:
+        return "No valid ECG beats were detected, so your heart rhythm could not be analyzed."
+
+    # Count predicted classes
+    unique, counts = np.unique(y_pred, return_counts=True)
+    count_map = dict(zip(unique, counts))
+
+    n = count_map.get(1, 0)  # Normal
+    s = count_map.get(2, 0)  # Supraventricular ectopy
+    v = count_map.get(3, 0)  # Ventricular ectopy
+    f = count_map.get(0, 0)  # Fusion beats
+
+    total = len(y_pred)
+
+    # --- Build the paragraph ---
+    paragraph = "Based on the analysis of your ECG signal, "
+
+    # Mostly normal
+    if n / total > 0.90:
+        paragraph += (
+            "your heart rhythm appears predominantly normal, with regular beats "
+            "and no significant signs of arrhythmia."
+        )
+        return paragraph
+
+    findings = []
+
+    # Supraventricular
+    if s > 0:
+        findings.append(
+            "some supraventricular ectopic beats were detected, which may be associated "
+            "with premature atrial contractions or supraventricular arrhythmias"
+        )
+
+    # Ventricular
+    if v > 0:
+        findings.append(
+            "ventricular ectopic beats were observed, which can indicate premature ventricular "
+            "contractions (PVCs) and may require medical evaluation"
+        )
+
+    # Fusion
+    if f > 0:
+        findings.append(
+            "fusion beats were present, meaning the heart's electrical activity came from both "
+            "normal and ectopic sources at the same time"
+        )
+
+    if findings:
+        paragraph += "; ".join(findings) + ". "
+        paragraph += (
+            "These patterns suggest the presence of irregular cardiac activity, and it may be "
+            "helpful to consult a medical professional for further interpretation."
+        )
+        return paragraph
+
+    # Mild abnormalities
+    paragraph += (
+        "some irregularities were detected, although they do not clearly correspond to a specific "
+        "arrhythmia type. A medical review is recommended."
+    )
+
+    return paragraph
+
 # --- 2. UTILITY FUNCTIONS ---
 
 @st.cache_resource
@@ -296,7 +368,9 @@ if model:
                                 "Confidence": [f"{np.max(p)*100:.1f}%" for p in preds]
                             })
                             st.dataframe(df_res, use_container_width=True, height=300)
-                            
+                            condition_text = generate_condition_paragraph(pred_idxs)
+                            st.info(condition_text)
+
                         else:
                             st.error("Could not detect valid heartbeats.")
                             
@@ -351,6 +425,9 @@ with tab2:
                         
                         st.text("Classification Report:")
                         st.code(report)
+                        condition_text = generate_condition_paragraph(y_pred_filtered)
+                        st.info(condition_text)
+
                         
                     else:
                         st.warning("Could not align detected peaks with ground truth annotations for accuracy.")
