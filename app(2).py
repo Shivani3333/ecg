@@ -15,7 +15,7 @@ import wfdb
 from scipy.signal import resample
 import io
 import time
-from tensorflow.keras.models import load_model
+from keras.models import load_model
 
 # --- Configuration and Constants ---
 # Model path and expected input shape
