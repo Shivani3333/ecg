@@ -350,7 +350,7 @@ with tab2:
                         )
                         
                         st.text("Classification Report:")
-                        
+                        st.code(report)
                         
                     else:
                         st.warning("Could not align detected peaks with ground truth annotations for accuracy.")
