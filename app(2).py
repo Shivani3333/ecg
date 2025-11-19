@@ -304,7 +304,7 @@ if model:
                 st.error(msg)
 
     # --- TAB 2: PHYSIONET ---
-# --- TAB 2: PHYSIONET ---
+    # --- TAB 2: PHYSIONET ---
 with tab2:
     st.header("Test on MIT-BIH Database")
     col_a, col_b = st.columns([1, 3])
