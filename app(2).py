@@ -316,7 +316,7 @@ def evaluate_against_ground_truth(valid_peaks, annotation_obj, predictions_indic
 # --- 3. STREAMLIT UI ---
 
 st.set_page_config(page_title="ECG Classifier", layout="wide")
-st.title("🫀 ECG Arrhythmia Classifier")
+st.title("🫀 Cardiac Anomaly Classifier")
 
 model = load_ecg_model()
 
